@@ -6,6 +6,8 @@
 <title>Local AI Chat</title>
 <link rel="stylesheet" href="styles.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 </head>
 <body>
   <header>
@@ -325,6 +327,71 @@
     return THINK_OPEN + reasoning + THINK_CLOSE + answer;
   }
 
+  if (window.marked) marked.setOptions({ breaks: true, gfm: true });
+
+  function escapeHtml(text) {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function renderMarkdown(text) {
+    if (!text) return "";
+    if (!window.marked) return "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>";
+    const html = marked.parse(text);
+    return window.DOMPurify ? DOMPurify.sanitize(html) : html;
+  }
+
+  function downloadFilename(text, role) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const trimmed = (text || "").trim();
+    let ext = ".md";
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try { JSON.parse(trimmed); ext = ".json"; } catch (_) {}
+    }
+    return (role || "message") + "-" + stamp + ext;
+  }
+
+  function downloadText(text, role) {
+    if (!text) return;
+    const trimmed = text.trim();
+    const filename = downloadFilename(trimmed, role);
+    const type = filename.endsWith(".json") ? "application/json" : "text/markdown";
+    const blob = new Blob([trimmed], { type });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function createBubble(role, text) {
+    const wrap = document.createElement("div");
+    wrap.className = "bubble-wrap";
+    const dl = document.createElement("button");
+    dl.type = "button";
+    dl.className = "bubble-dl";
+    dl.title = "Download";
+    dl.setAttribute("aria-label", "Download message");
+    dl.textContent = "↓";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    wrap.appendChild(dl);
+    wrap.appendChild(bubble);
+    setBubbleContent(wrap, bubble, text || "");
+    dl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      downloadText(wrap.dataset.raw || "", role);
+    });
+    return { wrap, bubble };
+  }
+
+  function setBubbleContent(wrap, bubble, text) {
+    wrap.dataset.raw = text;
+    bubble.innerHTML = renderMarkdown(text);
+  }
+
   function addMessageNode(role, content) {
     const wrap = document.createElement("div");
     wrap.className = "msg " + role;
@@ -336,26 +403,15 @@
     if (role === "assistant") {
       const { reasoning, answer } = extractThinkParts(content, "");
       if (reasoning) wrap.appendChild(buildThink(reasoning));
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-      bubble.textContent = answer;
-      wrap.appendChild(bubble);
+      wrap.appendChild(createBubble(role, answer).wrap);
     } else if (Array.isArray(content)) {
       // multimodal content: text parts + image_url parts
       const text = content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n");
-      if (text) {
-        const bubble = document.createElement("div");
-        bubble.className = "bubble";
-        bubble.textContent = text;
-        wrap.appendChild(bubble);
-      }
+      if (text) wrap.appendChild(createBubble(role, text).wrap);
       content.filter((p) => p && p.type === "image_url" && p.image_url && p.image_url.url)
         .forEach((p) => wrap.appendChild(imgThumb(p.image_url.url)));
     } else {
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-      bubble.textContent = content;
-      wrap.appendChild(bubble);
+      wrap.appendChild(createBubble(role, content).wrap);
     }
     els.messages.appendChild(wrap);
     return wrap;
@@ -377,7 +433,7 @@
     s.textContent = "Reasoning";
     const body = document.createElement("div");
     body.className = "think-body";
-    body.textContent = text;
+    body.innerHTML = renderMarkdown(text);
     d.appendChild(s); d.appendChild(body);
     return d;
   }
@@ -501,11 +557,8 @@
     const roleEl = document.createElement("div");
     roleEl.className = "role"; roleEl.textContent = "You · template";
     wrap.appendChild(roleEl);
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    bubble.textContent = "Sent request template" +
-      (attachedImages.length ? " with " + attachedImages.length + " image(s)" : "");
-    wrap.appendChild(bubble);
+    wrap.appendChild(createBubble("user", "Sent request template" +
+      (attachedImages.length ? " with " + attachedImages.length + " image(s)" : "")).wrap);
     attachedImages.forEach((im) => wrap.appendChild(imgThumb(im.dataUrl)));
     els.messages.appendChild(wrap);
   }
@@ -652,9 +705,9 @@
     roleEl.className = "role"; roleEl.textContent = "assistant";
     asstWrap.appendChild(roleEl);
     let thinkEl = null, thinkBody = null;
-    const bubble = document.createElement("div");
-    bubble.className = "bubble cursor-blink";
-    asstWrap.appendChild(bubble);
+    const { wrap: bubbleWrap, bubble } = createBubble("assistant", "");
+    bubble.classList.add("cursor-blink");
+    asstWrap.appendChild(bubbleWrap);
     els.messages.appendChild(asstWrap);
     scrollToBottom();
 
@@ -669,9 +722,9 @@
           thinkBody = thinkEl.querySelector(".think-body");
           asstWrap.insertBefore(thinkEl, bubble);
         }
-        thinkBody.textContent = reasoning;
+        thinkBody.innerHTML = renderMarkdown(reasoning);
       }
-      bubble.textContent = answer;
+      setBubbleContent(bubbleWrap, bubble, answer);
       // Keep reasoning visible while the model is still thinking and the answer is empty.
       if (thinkEl && !answer.trim() && reasoning) thinkEl.open = true;
       scrollToBottom();
