@@ -1,0 +1,24 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Extract receipt data and return only the JSON object requested by the schema."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Extract receipt-level merchant, purchaseDate, totalAmount, currency, and a products array from this receipt. For each product use category as one of {{RECEIPT_CATEGORIES}} when confident, and null when uncertain. Use purchaseDate in YYYY-MM-DD format, totalAmount as the full receipt total, each product amount only when a line-item amount is reasonably clear, warrantyType as one of none, fixed_term, or lifetime, and warrantyTermMonths as a positive integer when warrantyType is fixed_term. Only include clearly identifiable tracked products with usable names in the products array. If no such products can be identified, return an empty products array. Only use lifetime when the uploaded image explicitly states a lifetime warranty or guarantee. If the uploaded image shows an explicit warranty term for a product, use that explicit warranty and set warrantyAssessment.source to explicit with a short supporting snippet in warrantyEvidence. If there is no explicit warranty term on the uploaded image, you may infer only a likely statutory or legal minimum fixed-term warranty when the receipt itself provides enough evidence for all of the following: the transaction jurisdiction, a specific covered consumer good, and the purchase date. For inferred warranties, set warrantyAssessment.source to inferred, fill jurisdiction and jurisdictionBasis, include short evidence snippets for jurisdictionEvidence, coveredProductEvidence, and purchaseDateEvidence, and set coveredProduct to true only when the document identifies a specific covered product. Never infer lifetime warranties, merchant policies, or manufacturer policies. Use only likely statutory or legal minimum coverage for inferred warranties. Currency alone is never enough to infer jurisdiction. Use currency only as supporting context. Treat return windows, exchange periods, and satisfaction guarantees as no warranty unless the document clearly frames them as a warranty or guarantee. If a product is unclear, the jurisdiction is unclear, the purchase date is unclear, or the document shows only an expiry date without a clear warranty term in months, return warrantyType none and warrantyTermMonths null for that product. Evidence snippets should be short verbatim snippets from the uploaded image, or null when unavailable."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "{{IMAGE_DATA_URL}}",
+            "detail": "high"
+          }
+        }
+      ]
+    }
+  ]
+}

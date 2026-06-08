@@ -111,6 +111,31 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .composer .inner { max-width: 820px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
 .composer textarea { flex: 1; min-height: 44px; max-height: 200px; }
 .composer .send-col { display: flex; flex-direction: column; gap: 6px; }
+.composer-tools { max-width: 820px; margin: 0 auto 8px; display: flex; gap: 8px; align-items: center; }
+.tools-hint { font-size: 11px; color: var(--muted); margin-left: auto; }
+.btn.small { padding: 5px 10px; font-size: 12px; }
+
+/* Image attachments preview */
+.attachments { max-width: 820px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.attachments:not(:empty) { margin-bottom: 8px; }
+.attach-chip { position: relative; width: 64px; height: 64px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-rm {
+  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; line-height: 16px;
+  border: none; border-radius: 50%; background: rgba(0,0,0,.65); color: #fff; cursor: pointer;
+  font-size: 13px; padding: 0;
+}
+.msg-img { max-width: 280px; max-height: 280px; border-radius: 8px; border: 1px solid var(--border); margin-top: 4px; }
+
+/* Request preview modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 50; }
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 760px; max-height: 85vh; display: flex; flex-direction: column; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { margin: 0; font-size: 14px; }
+.modal-sub { padding: 8px 16px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); word-break: break-all; }
+.req-body { margin: 0; padding: 14px 16px; overflow: auto; flex: 1; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
+.modal-foot { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--border); }
+.modal-foot .btn { margin-left: auto; }
 .error-banner { background: rgba(255,107,107,.12); border: 1px solid var(--danger); color: #ffb4b4;
   padding: 8px 12px; border-radius: 8px; font-size: 13px; margin: 0 auto 10px; max-width: 820px; }
 .cursor-blink::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }

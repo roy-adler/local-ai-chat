@@ -74,6 +74,29 @@
         <textarea id="system" placeholder="You are a helpful assistant."></textarea>
       </div>
 
+      <h2>Request template</h2>
+      <div class="field">
+        <div class="inline">
+          <input type="checkbox" id="useTemplate" />
+          <label for="useTemplate" style="margin:0">Use template for next send</label>
+        </div>
+        <div class="hint">Sends the template's full <code>messages</code> array instead of the chat history + system prompt.</div>
+      </div>
+      <div class="field">
+        <label for="templateFile">Load template file</label>
+        <input type="file" id="templateFile" accept=".json,application/json" />
+        <div class="hint">e.g. <code>beleg_von_barbara.json</code></div>
+      </div>
+      <div class="field">
+        <label for="templateText">Template JSON</label>
+        <textarea id="templateText" spellcheck="false" placeholder='{ "messages": [ ... ] }'></textarea>
+      </div>
+      <div class="field">
+        <label for="categories">RECEIPT_CATEGORIES</label>
+        <input type="text" id="categories" placeholder="electronics, clothing, groceries, …" />
+        <div class="hint">Comma-separated list that fills <code>{{RECEIPT_CATEGORIES}}</code>. The attached image fills <code>{{IMAGE_DATA_URL}}</code>.</div>
+      </div>
+
       <h2>Session</h2>
       <div class="btn-row">
         <button class="btn secondary" id="saveBtn" type="button">Save settings</button>
@@ -90,6 +113,13 @@
       </div>
       <div class="composer">
         <div id="errorSlot"></div>
+        <div class="composer-tools">
+          <button class="btn secondary small" id="attachBtn" type="button">Attach image</button>
+          <button class="btn secondary small" id="viewReqBtn" type="button">View request</button>
+          <span class="tools-hint" id="modeHint"></span>
+          <input type="file" id="imageFile" accept="image/*" multiple hidden />
+        </div>
+        <div id="attachments" class="attachments"></div>
         <div class="inner">
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for newline)"></textarea>
           <div class="send-col">
@@ -99,6 +129,23 @@
         </div>
       </div>
     </main>
+  </div>
+
+  <div class="modal-overlay" id="reqModal" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Request preview</h3>
+        <button class="btn secondary small" id="closeReqModal" type="button">Close</button>
+      </div>
+      <div class="modal-sub">POST <span id="reqUrl"></span></div>
+      <pre id="reqBody" class="req-body"></pre>
+      <div class="modal-foot">
+        <label class="inline" style="font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="truncImages" checked /> Truncate image data
+        </label>
+        <button class="btn secondary small" id="copyReqBtn" type="button">Copy full JSON</button>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -115,6 +162,13 @@
     testBtn: $("testBtn"), toggleKey: $("toggleKey"), statusDot: $("statusDot"),
     statusText: $("statusText"), modelList: $("modelList"), emptyState: $("emptyState"),
     errorSlot: $("errorSlot"),
+    useTemplate: $("useTemplate"), templateFile: $("templateFile"),
+    templateText: $("templateText"), categories: $("categories"),
+    attachBtn: $("attachBtn"), viewReqBtn: $("viewReqBtn"), imageFile: $("imageFile"),
+    attachments: $("attachments"), modeHint: $("modeHint"),
+    reqModal: $("reqModal"), reqUrl: $("reqUrl"), reqBody: $("reqBody"),
+    truncImages: $("truncImages"), closeReqModal: $("closeReqModal"),
+    copyReqBtn: $("copyReqBtn"),
   };
 
   const STORE_KEY = "local-ai-chat-settings";
@@ -122,11 +176,14 @@
     baseUrl: "http://localhost:8888/v1/chat/completions",
     apiKey: "", model: "", stream: true,
     temperature: "", topP: "", maxTokens: "", seed: "", system: "",
+    useTemplate: false, templateText: "", categories: "",
   };
 
   // Conversation history: [{role, content}]
   let history = [];
   let controller = null; // AbortController for in-flight request
+  // Pending image attachments for the next send: [{name, dataUrl}]
+  let attachedImages = [];
 
   // ---------- settings persistence ----------
   function loadSettings() {
@@ -142,6 +199,9 @@
     els.maxTokens.value = v.maxTokens;
     els.seed.value = v.seed;
     els.system.value = v.system;
+    els.useTemplate.checked = !!v.useTemplate;
+    els.templateText.value = v.templateText;
+    els.categories.value = v.categories;
   }
   function currentSettings() {
     return {
@@ -154,10 +214,16 @@
       maxTokens: els.maxTokens.value,
       seed: els.seed.value,
       system: els.system.value,
+      useTemplate: els.useTemplate.checked,
+      templateText: els.templateText.value,
+      categories: els.categories.value,
     };
   }
-  function saveSettings() {
+  function saveCurrent() {
     localStorage.setItem(STORE_KEY, JSON.stringify(currentSettings()));
+  }
+  function saveSettings() {
+    saveCurrent();
     flashStatus("settings saved", "ok");
   }
 
@@ -233,6 +299,17 @@
       bubble.className = "bubble";
       bubble.textContent = answer;
       wrap.appendChild(bubble);
+    } else if (Array.isArray(content)) {
+      // multimodal content: text parts + image_url parts
+      const text = content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n");
+      if (text) {
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.textContent = text;
+        wrap.appendChild(bubble);
+      }
+      content.filter((p) => p && p.type === "image_url" && p.image_url && p.image_url.url)
+        .forEach((p) => wrap.appendChild(imgThumb(p.image_url.url)));
     } else {
       const bubble = document.createElement("div");
       bubble.className = "bubble";
@@ -241,6 +318,14 @@
     }
     els.messages.appendChild(wrap);
     return wrap;
+  }
+
+  function imgThumb(src) {
+    const img = document.createElement("img");
+    img.className = "msg-img";
+    img.src = src;
+    img.alt = "attached image";
+    return img;
   }
 
   function buildThink(text) {
@@ -259,12 +344,8 @@
   function scrollToBottom() { els.messages.scrollTop = els.messages.scrollHeight; }
 
   // ---------- request building ----------
-  function buildBody(settings) {
-    const msgs = [];
-    if (settings.system.trim()) msgs.push({ role: "system", content: settings.system });
-    history.forEach((m) => msgs.push({ role: m.role, content: m.content }));
-
-    const body = { messages: msgs, stream: settings.stream };
+  function buildBody(settings, messagesOverride) {
+    const body = { messages: messagesOverride || [], stream: settings.stream };
     if (settings.model) body.model = settings.model;
     if (settings.temperature !== "") body.temperature = Number(settings.temperature);
     if (settings.topP !== "") body.top_p = Number(settings.topP);
@@ -278,19 +359,184 @@
     return h;
   }
 
+  function templateActive() {
+    return els.useTemplate.checked && els.templateText.value.trim() !== "";
+  }
+
+  // Builds an OpenAI-style user content from text + attached images.
+  // Returns a plain string when there are no images, else a content-parts array.
+  function buildUserContent(text, images) {
+    if (!images.length) return text;
+    const parts = [];
+    if (text) parts.push({ type: "text", text });
+    images.forEach((im) => parts.push({
+      type: "image_url",
+      image_url: { url: im.dataUrl, detail: "high" },
+    }));
+    return parts;
+  }
+
+  // Recursively replaces placeholder tokens in every string of a parsed value.
+  function deepFill(node, vars) {
+    if (typeof node === "string") {
+      let s = node;
+      for (const k in vars) s = s.split(k).join(vars[k]);
+      return s;
+    }
+    if (Array.isArray(node)) return node.map((n) => deepFill(n, vars));
+    if (node && typeof node === "object") {
+      const out = {};
+      for (const k in node) out[k] = deepFill(node[k], vars);
+      return out;
+    }
+    return node;
+  }
+
+  function templateVars() {
+    return {
+      "{{IMAGE_DATA_URL}}": attachedImages[0] ? attachedImages[0].dataUrl : "{{IMAGE_DATA_URL}}",
+      "{{RECEIPT_CATEGORIES}}": els.categories.value.trim(),
+    };
+  }
+
+  // Removes // line and /* */ block comments that live outside of strings,
+  // so hand-written "JSONC" templates with notes/TODOs still parse.
+  function stripJsonComments(s) {
+    let out = "", inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i], n = s[i + 1];
+      if (inStr) {
+        out += c;
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') { inStr = true; out += c; continue; }
+      if (c === "/" && n === "/") { while (i < s.length && s[i] !== "\n") i++; out += "\n"; continue; }
+      if (c === "/" && n === "*") { i += 2; while (i < s.length && !(s[i] === "*" && s[i + 1] === "/")) i++; i++; continue; }
+      out += c;
+    }
+    return out;
+  }
+  function parseTemplate(text) {
+    return JSON.parse(stripJsonComments(text));
+  }
+
+  // Parses the template textarea and returns its filled messages array. Throws on bad input.
+  function fillTemplate() {
+    const tpl = parseTemplate(els.templateText.value);
+    const msgs = Array.isArray(tpl) ? tpl : tpl && tpl.messages;
+    if (!Array.isArray(msgs)) throw new Error("Template must be a messages array or an object with a 'messages' array.");
+    return deepFill(msgs, templateVars());
+  }
+
+  // System prompt + conversation history as an OpenAI messages array.
+  function historyMessages(settings) {
+    const msgs = [];
+    if (settings.system.trim()) msgs.push({ role: "system", content: settings.system });
+    history.forEach((m) => msgs.push({ role: m.role, content: m.content }));
+    return msgs;
+  }
+
+  // Renders a compact "you sent a template" node (template sends are one-shot, not stored in history).
+  function renderTemplateUserNode() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    const roleEl = document.createElement("div");
+    roleEl.className = "role"; roleEl.textContent = "You · template";
+    wrap.appendChild(roleEl);
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = "Sent request template" +
+      (attachedImages.length ? " with " + attachedImages.length + " image(s)" : "");
+    wrap.appendChild(bubble);
+    attachedImages.forEach((im) => wrap.appendChild(imgThumb(im.dataUrl)));
+    els.messages.appendChild(wrap);
+  }
+
+  // Computes the messages array that a send right now would use (without mutating history).
+  function previewMessages(settings) {
+    if (templateActive()) return fillTemplate();
+    const msgs = [];
+    if (settings.system.trim()) msgs.push({ role: "system", content: settings.system });
+    history.forEach((m) => msgs.push({ role: m.role, content: m.content }));
+    const text = els.input.value.trim();
+    if (text || attachedImages.length) {
+      msgs.push({ role: "user", content: buildUserContent(text, attachedImages) });
+    }
+    return msgs;
+  }
+
+  // ---------- attachments ----------
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(r.error || new Error("Could not read file"));
+      r.readAsDataURL(file);
+    });
+  }
+  async function addImageFiles(fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+    for (const f of files) {
+      try { attachedImages.push({ name: f.name, dataUrl: await fileToDataUrl(f) }); }
+      catch (e) { showError("Failed to read " + f.name + ": " + (e.message || e)); }
+    }
+    renderAttachments();
+  }
+  function renderAttachments() {
+    els.attachments.innerHTML = "";
+    attachedImages.forEach((im, i) => {
+      const chip = document.createElement("div");
+      chip.className = "attach-chip";
+      const img = document.createElement("img");
+      img.src = im.dataUrl; img.alt = im.name;
+      const rm = document.createElement("button");
+      rm.type = "button"; rm.className = "attach-rm"; rm.textContent = "×";
+      rm.title = "Remove";
+      rm.addEventListener("click", () => { attachedImages.splice(i, 1); renderAttachments(); });
+      chip.appendChild(img); chip.appendChild(rm);
+      els.attachments.appendChild(chip);
+    });
+    updateModeHint();
+  }
+  function updateModeHint() {
+    const bits = [];
+    if (templateActive()) bits.push("template mode");
+    if (attachedImages.length) bits.push(attachedImages.length + " image(s)");
+    els.modeHint.textContent = bits.join(" · ");
+  }
+
   // ---------- send ----------
   async function send() {
     const settings = currentSettings();
     if (!settings.baseUrl) { showError("Please set an endpoint URL."); return; }
-    const text = els.input.value.trim();
-    if (!text) return;
     clearError();
 
-    history.push({ role: "user", content: text });
-    addMessageNode("user", text);
-    hideEmpty();
-    els.input.value = "";
-    autosize();
+    let requestMessages; // explicit override for template mode; null = use history
+    if (templateActive()) {
+      let msgs;
+      try { msgs = fillTemplate(); }
+      catch (e) { showError("Template JSON is invalid: " + (e.message || e)); return; }
+      requestMessages = msgs;
+      hideEmpty();
+      renderTemplateUserNode();
+      attachedImages = [];
+      renderAttachments();
+    } else {
+      const text = els.input.value.trim();
+      if (!text && !attachedImages.length) return;
+      const content = buildUserContent(text, attachedImages);
+      history.push({ role: "user", content });
+      addMessageNode("user", content);
+      hideEmpty();
+      els.input.value = "";
+      attachedImages = [];
+      renderAttachments();
+      autosize();
+      requestMessages = null;
+    }
     scrollToBottom();
 
     // assistant placeholder
@@ -326,10 +572,11 @@
     controller = new AbortController();
     try {
       const url = chatUrl(settings.baseUrl);
+      const msgs = requestMessages || historyMessages(settings);
       const res = await fetch(url, {
         method: "POST",
         headers: headers(settings),
-        body: JSON.stringify(buildBody(settings)),
+        body: JSON.stringify(buildBody(settings, msgs)),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -429,6 +676,42 @@
     }
   }
 
+  // ---------- request preview ----------
+  function deepMap(node, fn) {
+    if (typeof node === "string") return fn(node);
+    if (Array.isArray(node)) return node.map((n) => deepMap(n, fn));
+    if (node && typeof node === "object") {
+      const out = {};
+      for (const k in node) out[k] = deepMap(node[k], fn);
+      return out;
+    }
+    return node;
+  }
+  function truncateDataUrls(obj) {
+    return deepMap(obj, (s) => {
+      if (s.startsWith("data:") && s.length > 100) {
+        return s.slice(0, 48) + "…[+" + (s.length - 48) + " chars]";
+      }
+      return s;
+    });
+  }
+  let lastPreviewBody = null;
+  function showRequestPreview() {
+    const settings = currentSettings();
+    let msgs;
+    try { msgs = previewMessages(settings); }
+    catch (e) { showError("Template JSON is invalid: " + (e.message || e)); return; }
+    lastPreviewBody = buildBody(settings, msgs);
+    els.reqUrl.textContent = settings.baseUrl ? chatUrl(settings.baseUrl) : "(set an endpoint URL)";
+    renderPreviewBody();
+    els.reqModal.style.display = "flex";
+  }
+  function renderPreviewBody() {
+    if (!lastPreviewBody) return;
+    const shown = els.truncImages.checked ? truncateDataUrls(lastPreviewBody) : lastPreviewBody;
+    els.reqBody.textContent = JSON.stringify(shown, null, 2);
+  }
+
   // ---------- composer behaviour ----------
   function autosize() {
     els.input.style.height = "auto";
@@ -453,14 +736,61 @@
   els.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!els.input.disabled) send(); }
   });
-  // auto-save on change so a refresh keeps your config
-  ["baseUrl","apiKey","model","temperature","topP","maxTokens","seed","system"].forEach((k) => {
-    els[k].addEventListener("change", () => localStorage.setItem(STORE_KEY, JSON.stringify(currentSettings())));
+
+  // image attachments
+  els.attachBtn.addEventListener("click", () => els.imageFile.click());
+  els.imageFile.addEventListener("change", async (e) => {
+    await addImageFiles(e.target.files);
+    els.imageFile.value = ""; // allow re-selecting the same file
   });
-  els.stream.addEventListener("change", () => localStorage.setItem(STORE_KEY, JSON.stringify(currentSettings())));
+  // paste an image straight into the composer
+  els.input.addEventListener("paste", (e) => {
+    const imgs = Array.from(e.clipboardData ? e.clipboardData.files : []).filter((f) => f.type.startsWith("image/"));
+    if (imgs.length) { e.preventDefault(); addImageFiles(imgs); }
+  });
+
+  // request preview modal
+  els.viewReqBtn.addEventListener("click", showRequestPreview);
+  els.closeReqModal.addEventListener("click", () => { els.reqModal.style.display = "none"; });
+  els.reqModal.addEventListener("click", (e) => { if (e.target === els.reqModal) els.reqModal.style.display = "none"; });
+  els.truncImages.addEventListener("change", renderPreviewBody);
+  els.copyReqBtn.addEventListener("click", async () => {
+    if (!lastPreviewBody) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(lastPreviewBody, null, 2));
+      els.copyReqBtn.textContent = "Copied!";
+      setTimeout(() => { els.copyReqBtn.textContent = "Copy full JSON"; }, 1500);
+    } catch (_) { showError("Clipboard copy was blocked by the browser."); }
+  });
+
+  // template loading
+  els.templateFile.addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      parseTemplate(txt); // validate early (tolerates // and /* */ comments)
+      els.templateText.value = txt;
+      els.useTemplate.checked = true;
+      saveCurrent();
+      updateModeHint();
+      flashStatus("template loaded", "ok");
+    } catch (err) {
+      showError("Could not load template: " + (err.message || err));
+    }
+    els.templateFile.value = "";
+  });
+  els.useTemplate.addEventListener("change", () => { saveCurrent(); updateModeHint(); });
+
+  // auto-save on change so a refresh keeps your config
+  ["baseUrl","apiKey","model","temperature","topP","maxTokens","seed","system","templateText","categories"].forEach((k) => {
+    els[k].addEventListener("change", saveCurrent);
+  });
+  els.stream.addEventListener("change", saveCurrent);
 
   loadSettings();
   autosize();
+  updateModeHint();
   setStatus("not connected", null);
 })();
 </script>
