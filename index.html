@@ -428,7 +428,7 @@
   function buildThink(text) {
     const d = document.createElement("details");
     d.className = "think";
-    d.open = false;
+    d.open = true;
     const s = document.createElement("summary");
     s.textContent = "Reasoning";
     const body = document.createElement("div");
@@ -720,13 +720,12 @@
           thinkEl = buildThink("");
           thinkEl.open = true;
           thinkBody = thinkEl.querySelector(".think-body");
-          asstWrap.insertBefore(thinkEl, bubble);
+          asstWrap.insertBefore(thinkEl, bubbleWrap);
         }
         thinkBody.innerHTML = renderMarkdown(reasoning);
       }
       setBubbleContent(bubbleWrap, bubble, answer);
-      // Keep reasoning visible while the model is still thinking and the answer is empty.
-      if (thinkEl && !answer.trim() && reasoning) thinkEl.open = true;
+      if (thinkEl && reasoning) thinkEl.open = true;
       scrollToBottom();
     };
 
@@ -761,7 +760,7 @@
       }
 
       const finalParts = extractThinkParts(full, reasoningFull);
-      if (thinkEl) thinkEl.open = !finalParts.answer.trim() && !!finalParts.reasoning.trim();
+      if (thinkEl && finalParts.reasoning) thinkEl.open = true;
       bubble.classList.remove("cursor-blink");
       history.push({
         role: "assistant",
@@ -774,7 +773,7 @@
       if (err.name === "AbortError") {
         if (hasContent) {
           updateView();
-          if (thinkEl) thinkEl.open = !extractThinkParts(full, reasoningFull).answer.trim();
+          if (thinkEl && extractThinkParts(full, reasoningFull).reasoning) thinkEl.open = true;
           history.push({
             role: "assistant",
             content: toStoredAssistantContent(full, reasoningFull),
@@ -854,7 +853,11 @@
       ids.forEach((id) => {
         const o = document.createElement("option"); o.value = id; els.modelList.appendChild(o);
       });
-      if (ids.length && !els.model.value) els.model.value = ids[0];
+      if (ids.length) {
+        const current = els.model.value.trim();
+        els.model.value = ids.includes(current) ? current : ids[0];
+        saveCurrent();
+      }
       setStatus("connected · " + (ids.length ? ids.length + " model(s)" : "ok"), "ok");
     } catch (err) {
       setStatus("connection failed", "err");
