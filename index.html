@@ -279,20 +279,50 @@
     scrollToBottom();
   }
 
-  // Splits assistant content into reasoning (<think>...</think>) and answer.
-  function splitThink(text) {
-    let reasoning = "";
-    let answer = text;
-    const closed = /<think>([\s\S]*?)<\/think>/i;
-    const m = text.match(closed);
-    if (m) {
-      reasoning = m[1].trim();
-      answer = text.replace(closed, "").trimStart();
-    } else {
-      const open = /<think>([\s\S]*)$/i.exec(text);
-      if (open) { reasoning = open[1].trim(); answer = ""; }
+  // Splits assistant content into reasoning and answer.
+  // Handles , <think>, and streamed reasoning_content fields.
+  const THINK_TAG = "think";
+  const THINK_OPEN = "<" + THINK_TAG + ">";
+  const THINK_CLOSE = "</" + THINK_TAG + ">";
+  const REDACTED_OPEN = "<think>";
+  const REDACTED_CLOSE = "</think>";
+  const THINK_CLOSED_RE = [
+    new RegExp(THINK_OPEN + "([\\s\\S]*?)" + THINK_CLOSE, "i"),
+    new RegExp(REDACTED_OPEN + "([\\s\\S]*?)" + REDACTED_CLOSE, "i"),
+    new RegExp(REDACTED_OPEN + "([\\s\\S]*?)" + THINK_CLOSE, "i"),
+  ];
+  const THINK_OPEN_RE = [
+    new RegExp(THINK_OPEN + "([\\s\\S]*)$", "i"),
+    new RegExp(REDACTED_OPEN + "([\\s\\S]*)$", "i"),
+  ];
+
+  function extractThinkParts(text, streamedReasoning) {
+    let reasoning = (streamedReasoning || "").trim();
+    let answer = text || "";
+
+    for (const re of THINK_CLOSED_RE) {
+      const m = answer.match(re);
+      if (m) {
+        if (!reasoning) reasoning = m[1].trim();
+        answer = answer.replace(re, "").trimStart();
+        return { reasoning, answer };
+      }
     }
-    return { reasoning, answer };
+
+    if (!reasoning) {
+      for (const re of THINK_OPEN_RE) {
+        const m = re.exec(answer);
+        if (m) return { reasoning: m[1].trim(), answer: "" };
+      }
+    }
+
+    return { reasoning, answer: answer.trimStart() };
+  }
+
+  function toStoredAssistantContent(answer, reasoning) {
+    if (!reasoning) return answer;
+    if (answer.includes(THINK_OPEN) || answer.includes(REDACTED_OPEN)) return answer;
+    return THINK_OPEN + reasoning + THINK_CLOSE + answer;
   }
 
   function addMessageNode(role, content) {
@@ -304,7 +334,7 @@
     wrap.appendChild(roleEl);
 
     if (role === "assistant") {
-      const { reasoning, answer } = splitThink(content);
+      const { reasoning, answer } = extractThinkParts(content, "");
       if (reasoning) wrap.appendChild(buildThink(reasoning));
       const bubble = document.createElement("div");
       bubble.className = "bubble";
@@ -629,8 +659,9 @@
     scrollToBottom();
 
     let full = "";
+    let reasoningFull = "";
     const updateView = () => {
-      const { reasoning, answer } = splitThink(full);
+      const { reasoning, answer } = extractThinkParts(full, reasoningFull);
       if (reasoning) {
         if (!thinkEl) {
           thinkEl = buildThink("");
@@ -641,6 +672,8 @@
         thinkBody.textContent = reasoning;
       }
       bubble.textContent = answer;
+      // Keep reasoning visible while the model is still thinking and the answer is empty.
+      if (thinkEl && !answer.trim() && reasoning) thinkEl.open = true;
       scrollToBottom();
     };
 
@@ -661,30 +694,52 @@
       }
 
       if (settings.stream && res.body) {
-        await readStream(res, (delta) => { full += delta; updateView(); });
+        await readStream(res, (chunk) => {
+          if (chunk.content) full += chunk.content;
+          if (chunk.reasoning) reasoningFull += chunk.reasoning;
+          updateView();
+        });
       } else {
         const data = await res.json();
-        full = (data.choices && data.choices[0] && data.choices[0].message
-                && data.choices[0].message.content) || "";
+        const msg = data.choices && data.choices[0] && data.choices[0].message;
+        full = (msg && msg.content) || "";
+        reasoningFull = (msg && (msg.reasoning_content || msg.reasoning)) || "";
         updateView();
       }
 
-      if (thinkEl) thinkEl.open = false; // collapse reasoning once done
+      const finalParts = extractThinkParts(full, reasoningFull);
+      if (thinkEl) thinkEl.open = !finalParts.answer.trim() && !!finalParts.reasoning.trim();
       bubble.classList.remove("cursor-blink");
-      history.push({ role: "assistant", content: full });
+      history.push({
+        role: "assistant",
+        content: toStoredAssistantContent(full, reasoningFull),
+      });
       setStatus("ready", "ok");
     } catch (err) {
       bubble.classList.remove("cursor-blink");
+      const hasContent = full.trim() || reasoningFull.trim();
       if (err.name === "AbortError") {
-        if (full.trim()) {
-          if (thinkEl) thinkEl.open = false;
-          history.push({ role: "assistant", content: full });
+        if (hasContent) {
+          updateView();
+          if (thinkEl) thinkEl.open = !extractThinkParts(full, reasoningFull).answer.trim();
+          history.push({
+            role: "assistant",
+            content: toStoredAssistantContent(full, reasoningFull),
+          });
         } else {
           asstWrap.remove();
         }
         flashStatus("stopped", null);
       } else {
-        asstWrap.remove();
+        if (hasContent) {
+          updateView();
+          history.push({
+            role: "assistant",
+            content: toStoredAssistantContent(full, reasoningFull),
+          });
+        } else {
+          asstWrap.remove();
+        }
         showError(err.message || String(err));
         setStatus("error", "err");
       }
@@ -695,7 +750,7 @@
   }
 
   // Parses Server-Sent Events stream of OpenAI chat chunks.
-  async function readStream(res, onDelta) {
+  async function readStream(res, onChunk) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -714,8 +769,11 @@
         try {
           const json = JSON.parse(payload);
           const choice = json.choices && json.choices[0];
-          const delta = choice && choice.delta && choice.delta.content;
-          if (delta) onDelta(delta);
+          const delta = choice && choice.delta;
+          if (!delta) continue;
+          const content = delta.content || "";
+          const reasoning = delta.reasoning_content || delta.reasoning || "";
+          if (content || reasoning) onChunk({ content, reasoning });
         } catch (_) { /* ignore keep-alive / partial */ }
       }
     }
