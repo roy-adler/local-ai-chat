@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Local AI Chat</title>
 <link rel="stylesheet" href="styles.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
   <header>
@@ -83,9 +84,13 @@
         <div class="hint">Sends the template's full <code>messages</code> array instead of the chat history + system prompt.</div>
       </div>
       <div class="field">
+        <button class="btn secondary" id="loadBarbaraBtn" type="button" style="width:100%">Load Barbara receipt template</button>
+        <div class="hint">One-click preset — then attach a receipt image or PDF and Send.</div>
+      </div>
+      <div class="field">
         <label for="templateFile">Load template file</label>
         <input type="file" id="templateFile" accept=".json,application/json" />
-        <div class="hint">e.g. <code>beleg_von_barbara.json</code></div>
+        <div class="hint">Or pick any other <code>.json</code> template file.</div>
       </div>
       <div class="field">
         <label for="templateText">Template JSON</label>
@@ -94,7 +99,7 @@
       <div class="field">
         <label for="categories">RECEIPT_CATEGORIES</label>
         <input type="text" id="categories" placeholder="electronics, clothing, groceries, …" />
-        <div class="hint">Comma-separated list that fills <code>{{RECEIPT_CATEGORIES}}</code>. The attached image fills <code>{{IMAGE_DATA_URL}}</code>.</div>
+        <div class="hint">Comma-separated list that fills <code>{{RECEIPT_CATEGORIES}}</code>. The attached file fills <code>{{IMAGE_DATA_URL}}</code> (PDFs are converted to images).</div>
       </div>
 
       <h2>Session</h2>
@@ -114,10 +119,10 @@
       <div class="composer">
         <div id="errorSlot"></div>
         <div class="composer-tools">
-          <button class="btn secondary small" id="attachBtn" type="button">Attach image</button>
+          <button class="btn secondary small" id="attachBtn" type="button">Attach image / PDF</button>
           <button class="btn secondary small" id="viewReqBtn" type="button">View request</button>
           <span class="tools-hint" id="modeHint"></span>
-          <input type="file" id="imageFile" accept="image/*" multiple hidden />
+          <input type="file" id="imageFile" accept="image/*,application/pdf,.pdf" multiple hidden />
         </div>
         <div id="attachments" class="attachments"></div>
         <div class="inner">
@@ -162,7 +167,8 @@
     testBtn: $("testBtn"), toggleKey: $("toggleKey"), statusDot: $("statusDot"),
     statusText: $("statusText"), modelList: $("modelList"), emptyState: $("emptyState"),
     errorSlot: $("errorSlot"),
-    useTemplate: $("useTemplate"), templateFile: $("templateFile"),
+    useTemplate: $("useTemplate"), loadBarbaraBtn: $("loadBarbaraBtn"),
+    templateFile: $("templateFile"),
     templateText: $("templateText"), categories: $("categories"),
     attachBtn: $("attachBtn"), viewReqBtn: $("viewReqBtn"), imageFile: $("imageFile"),
     attachments: $("attachments"), modeHint: $("modeHint"),
@@ -182,8 +188,13 @@
   // Conversation history: [{role, content}]
   let history = [];
   let controller = null; // AbortController for in-flight request
-  // Pending image attachments for the next send: [{name, dataUrl}]
+  // Pending attachments for the next send: [{name, dataUrl}]
   let attachedImages = [];
+
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
 
   // ---------- settings persistence ----------
   function loadSettings() {
@@ -423,12 +434,26 @@
     return JSON.parse(stripJsonComments(text));
   }
 
+  // Appends extra converted PDF pages after the template's primary image_url part.
+  function appendExtraTemplateImages(msgs, images) {
+    if (!images || images.length <= 1) return msgs;
+    const extras = images.slice(1).map((im) => ({
+      type: "image_url",
+      image_url: { url: im.dataUrl, detail: "high" },
+    }));
+    return msgs.map((m) => {
+      if (m.role !== "user" || !Array.isArray(m.content)) return m;
+      if (!m.content.some((p) => p && p.type === "image_url")) return m;
+      return { ...m, content: m.content.concat(extras) };
+    });
+  }
+
   // Parses the template textarea and returns its filled messages array. Throws on bad input.
   function fillTemplate() {
     const tpl = parseTemplate(els.templateText.value);
     const msgs = Array.isArray(tpl) ? tpl : tpl && tpl.messages;
     if (!Array.isArray(msgs)) throw new Error("Template must be a messages array or an object with a 'messages' array.");
-    return deepFill(msgs, templateVars());
+    return appendExtraTemplateImages(deepFill(msgs, templateVars()), attachedImages);
   }
 
   // System prompt + conversation history as an OpenAI messages array.
@@ -469,6 +494,12 @@
   }
 
   // ---------- attachments ----------
+  function isPdf(file) {
+    return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+  }
+  function isImage(file) {
+    return file.type.startsWith("image/");
+  }
   function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
       const r = new FileReader();
@@ -477,13 +508,54 @@
       r.readAsDataURL(file);
     });
   }
-  async function addImageFiles(fileList) {
-    const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
-    for (const f of files) {
-      try { attachedImages.push({ name: f.name, dataUrl: await fileToDataUrl(f) }); }
-      catch (e) { showError("Failed to read " + f.name + ": " + (e.message || e)); }
+  async function pdfToImages(file) {
+    if (!window.pdfjsLib) throw new Error("PDF.js is not loaded");
+    const data = new Uint8Array(await file.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const maxPages = 20;
+    const pageCount = Math.min(pdf.numPages, maxPages);
+    const base = file.name.replace(/\.pdf$/i, "");
+    const scale = 2;
+    const out = [];
+    for (let n = 1; n <= pageCount; n++) {
+      const page = await pdf.getPage(n);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      out.push({
+        name: pageCount === 1 ? base + ".png" : base + "-p" + n + ".png",
+        dataUrl: canvas.toDataURL("image/png"),
+      });
     }
-    renderAttachments();
+    if (pdf.numPages > maxPages) {
+      showError("PDF has " + pdf.numPages + " pages; only the first " + maxPages + " were attached.");
+    }
+    return out;
+  }
+  async function addAttachmentFiles(fileList) {
+    const files = Array.from(fileList || []).filter((f) => isImage(f) || isPdf(f));
+    if (!files.length) return;
+    els.attachBtn.disabled = true;
+    try {
+      for (const f of files) {
+        try {
+          if (isPdf(f)) {
+            setStatus("converting PDF…", null);
+            attachedImages.push(...await pdfToImages(f));
+            flashStatus("PDF converted", "ok");
+          } else {
+            attachedImages.push({ name: f.name, dataUrl: await fileToDataUrl(f) });
+          }
+        } catch (e) {
+          showError("Failed to read " + f.name + ": " + (e.message || e));
+        }
+      }
+      renderAttachments();
+    } finally {
+      els.attachBtn.disabled = false;
+    }
   }
   function renderAttachments() {
     els.attachments.innerHTML = "";
@@ -516,6 +588,10 @@
 
     let requestMessages; // explicit override for template mode; null = use history
     if (templateActive()) {
+      if (!attachedImages.length && els.templateText.value.includes("{{IMAGE_DATA_URL}}")) {
+        showError("Attach a receipt image or PDF first.");
+        return;
+      }
       let msgs;
       try { msgs = fillTemplate(); }
       catch (e) { showError("Template JSON is invalid: " + (e.message || e)); return; }
@@ -740,13 +816,14 @@
   // image attachments
   els.attachBtn.addEventListener("click", () => els.imageFile.click());
   els.imageFile.addEventListener("change", async (e) => {
-    await addImageFiles(e.target.files);
+    await addAttachmentFiles(e.target.files);
     els.imageFile.value = ""; // allow re-selecting the same file
   });
   // paste an image straight into the composer
   els.input.addEventListener("paste", (e) => {
-    const imgs = Array.from(e.clipboardData ? e.clipboardData.files : []).filter((f) => f.type.startsWith("image/"));
-    if (imgs.length) { e.preventDefault(); addImageFiles(imgs); }
+    const files = Array.from(e.clipboardData ? e.clipboardData.files : [])
+      .filter((f) => isImage(f) || isPdf(f));
+    if (files.length) { e.preventDefault(); addAttachmentFiles(files); }
   });
 
   // request preview modal
@@ -764,17 +841,29 @@
   });
 
   // template loading
+  function applyTemplateText(txt) {
+    parseTemplate(txt); // validate early (tolerates // and /* */ comments)
+    els.templateText.value = txt;
+    els.useTemplate.checked = true;
+    saveCurrent();
+    updateModeHint();
+    flashStatus("template loaded", "ok");
+  }
+  els.loadBarbaraBtn.addEventListener("click", async () => {
+    try {
+      const res = await fetch("messages/beleg_template.json");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      applyTemplateText(await res.text());
+    } catch (err) {
+      showError("Could not load Barbara template: " + (err.message || err) +
+        ". Serve this folder over HTTP (e.g. python3 -m http.server) or use Load template file.");
+    }
+  });
   els.templateFile.addEventListener("change", async (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     try {
-      const txt = await file.text();
-      parseTemplate(txt); // validate early (tolerates // and /* */ comments)
-      els.templateText.value = txt;
-      els.useTemplate.checked = true;
-      saveCurrent();
-      updateModeHint();
-      flashStatus("template loaded", "ok");
+      applyTemplateText(await file.text());
     } catch (err) {
       showError("Could not load template: " + (err.message || err));
     }

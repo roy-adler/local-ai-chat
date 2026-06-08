@@ -82,8 +82,10 @@ textarea { resize: vertical; min-height: 60px; }
   padding: 8px 12px; font-size: 13px; cursor: pointer; font-weight: 500;
 }
 .btn:hover { background: var(--accent); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
 .btn.secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
 .btn.secondary:hover { border-color: var(--accent); }
+.btn.secondary:disabled:hover { border-color: var(--border); }
 .btn-row { display: flex; gap: 8px; margin-top: 6px; }
 .btn-row .btn { flex: 1; }
 
