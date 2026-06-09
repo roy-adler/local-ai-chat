@@ -6,10 +6,12 @@ Examples:
   python run_template.py messages/beleg_template.json --file Belege/1.pdf
   python run_template.py -t messages/beleg_von_barbara.json --dir Belege
   python run_template.py messages/beleg_template.json --dir Belege
+  python run_template.py messages/beleg_template.json --dir Belege --json-only
   python run_template.py --file Belege/1.pdf
     (default template: messages/beleg_template.json)
     (default API key: unsloth-local-token.tk)
     (default output folder: output/)
+    (writes statistics.json with per-file timing and success metrics)
 
 Environment variables (optional):
   LOCAL_AI_URL       API URL (default: http://localhost:8888/v1/chat/completions)
@@ -419,7 +421,9 @@ def save_result(
     content: str,
     reasoning: str,
     full_response: dict[str, Any] | None,
-) -> list[Path]:
+    *,
+    json_only: bool = False,
+) -> tuple[list[Path], dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = output_paths(output_dir, source_file)
     saved: list[Path] = []
@@ -427,9 +431,15 @@ def save_result(
     thinking, answer = extract_think_parts(content, reasoning)
     json_raw, json_parsed = parse_json_output(answer)
 
-    if thinking.strip():
-        paths["thinking"].write_text(thinking.strip() + "\n", encoding="utf-8")
-        saved.append(paths["thinking"])
+    file_stats: dict[str, Any] = {
+        "content_chars": len(content),
+        "reasoning_chars": len(reasoning),
+        "thinking_chars": len(thinking),
+        "answer_chars": len(answer),
+        "json_extracted": json_raw is not None,
+        "json_valid": json_parsed is not None,
+        "output_files": [],
+    }
 
     if json_raw is not None:
         if json_parsed is not None:
@@ -440,10 +450,20 @@ def save_result(
         else:
             paths["json"].write_text(json_raw + "\n", encoding="utf-8")
         saved.append(paths["json"])
+        file_stats["output_files"].append(paths["json"].name)
+
+    if json_only:
+        return saved, file_stats
+
+    if thinking.strip():
+        paths["thinking"].write_text(thinking.strip() + "\n", encoding="utf-8")
+        saved.append(paths["thinking"])
+        file_stats["output_files"].append(paths["thinking"].name)
 
     if answer.strip():
         paths["assistant"].write_text(answer.strip() + "\n", encoding="utf-8")
         saved.append(paths["assistant"])
+        file_stats["output_files"].append(paths["assistant"].name)
 
     payload = {
         "source_file": str(source_file),
@@ -456,7 +476,15 @@ def save_result(
     }
     paths["response"].write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     saved.append(paths["response"])
-    return saved
+    file_stats["output_files"].append(paths["response"].name)
+    return saved, file_stats
+
+
+def save_statistics(output_dir: Path, summary: dict[str, Any]) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "statistics.json"
+    path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
 
 
 def process_file(
@@ -464,9 +492,18 @@ def process_file(
     *,
     template_msgs: list[dict[str, Any]],
     args: argparse.Namespace,
-) -> None:
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "source_file": str(path.resolve()),
+        "source_name": path.name,
+        "status": "ok",
+        "error": None,
+    }
     print(f"\n→ {path.name}")
+    prep_started = time.time()
     images = load_attachment(path, args.max_pdf_pages)
+    stats["images_attached"] = len(images)
+    stats["prep_seconds"] = round(time.time() - prep_started, 3)
     print(f"  attached {len(images)} image(s)")
     messages = build_messages(template_msgs, images, args.categories)
 
@@ -490,7 +527,8 @@ def process_file(
             max_tokens=args.max_tokens,
             seed=args.seed,
         ) | {"messages": preview}, indent=2)[:4000])
-        return
+        stats["status"] = "dry_run"
+        return stats
 
     body = build_body(
         messages,
@@ -502,19 +540,30 @@ def process_file(
         seed=args.seed,
     )
 
-    started = time.time()
+    api_started = time.time()
     content, reasoning, full_response = call_api(
         args.url,
         body,
         args.api_key,
         args.timeout,
     )
-    elapsed = time.time() - started
-    print(f"  done in {elapsed:.1f}s ({len(content)} chars)")
+    stats["api_seconds"] = round(time.time() - api_started, 3)
+    stats["elapsed_seconds"] = round(stats["prep_seconds"] + stats["api_seconds"], 3)
+    print(f"  done in {stats['api_seconds']:.1f}s ({len(content)} chars)")
 
     out_dir = Path(args.output).expanduser().resolve()
-    for saved_path in save_result(out_dir, path, content, reasoning, full_response):
+    saved_paths, file_stats = save_result(
+        out_dir,
+        path,
+        content,
+        reasoning,
+        full_response,
+        json_only=args.json_only,
+    )
+    stats.update(file_stats)
+    for saved_path in saved_paths:
         print(f"  saved {saved_path.name}")
+    return stats
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -563,6 +612,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recursive", action="store_true", help="With --dir, include subfolders")
     p.add_argument("--no-stream", action="store_true", help="Disable streaming responses")
     p.add_argument("--dry-run", action="store_true", help="Build request only; do not call the API")
+    p.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Only write extracted {name}.json files (skip thinking/assistant/response)",
+    )
     return p
 
 
@@ -603,14 +657,58 @@ def main() -> int:
     elif not args.dry_run:
         print("warning: no API key found (set --api-key, LOCAL_AI_API_KEY, or unsloth-local-token.tk)", file=sys.stderr)
 
+    run_started = time.time()
+    run_started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    out_dir = Path(args.output).expanduser().resolve()
+    file_stats: list[dict[str, Any]] = []
     failures = 0
+
     for i, path in enumerate(files, start=1):
         print(f"[{i}/{len(files)}]", end="")
+        entry: dict[str, Any] = {"index": i, "source_name": path.name}
         try:
-            process_file(path, template_msgs=template_msgs, args=args)
+            entry.update(process_file(path, template_msgs=template_msgs, args=args))
         except (OSError, ValueError, RuntimeError) as exc:
             failures += 1
+            entry["status"] = "failed"
+            entry["error"] = str(exc)
             print(f"  FAILED: {exc}", file=sys.stderr)
+        file_stats.append(entry)
+
+    total_elapsed = round(time.time() - run_started, 3)
+    succeeded = [f for f in file_stats if f.get("status") == "ok"]
+    ok_times = [f["elapsed_seconds"] for f in succeeded if f.get("elapsed_seconds") is not None]
+    api_times = [f["api_seconds"] for f in succeeded if f.get("api_seconds") is not None]
+
+    summary = {
+        "started_at": run_started_at,
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "total_elapsed_seconds": total_elapsed,
+        "template": str(template_path),
+        "endpoint": chat_url(args.url),
+        "output_dir": str(out_dir),
+        "model": args.model,
+        "json_only": args.json_only,
+        "stream": not args.no_stream,
+        "files_total": len(files),
+        "files_succeeded": len(succeeded),
+        "files_failed": failures,
+        "files_dry_run": sum(1 for f in file_stats if f.get("status") == "dry_run"),
+        "json_extracted_count": sum(1 for f in succeeded if f.get("json_extracted")),
+        "json_valid_count": sum(1 for f in succeeded if f.get("json_valid")),
+        "timing": {
+            "avg_elapsed_seconds": round(sum(ok_times) / len(ok_times), 3) if ok_times else None,
+            "min_elapsed_seconds": min(ok_times) if ok_times else None,
+            "max_elapsed_seconds": max(ok_times) if ok_times else None,
+            "avg_api_seconds": round(sum(api_times) / len(api_times), 3) if api_times else None,
+            "total_api_seconds": round(sum(api_times), 3) if api_times else None,
+        },
+        "files": file_stats,
+    }
+
+    if not args.dry_run:
+        stats_path = save_statistics(out_dir, summary)
+        print(f"\nstatistics: {stats_path}")
 
     if failures:
         print(f"\nFinished with {failures} failure(s).", file=sys.stderr)
