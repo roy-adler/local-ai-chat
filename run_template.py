@@ -44,7 +44,7 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_URL = "http://localhost:8888/v1/chat/completions"
-DEFAULT_TEMPLATE = PROJECT_ROOT / "messages" / "beleg_template.json"
+DEFAULT_TEMPLATE = PROJECT_ROOT / "beleg_template.json"
 DEFAULT_TOKEN_FILE = PROJECT_ROOT / "unsloth-local-token.tk"
 DEFAULT_OUTPUT = PROJECT_ROOT / "output"
 DEFAULT_CATEGORIES = (
