@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Five Server: start",
+      "command": "${command:fiveServer.start}"
+    },
+    {
+      "label": "Five Server: stop",
+      "command": "${command:fiveServer.close}"
+    }
+  ]
+}

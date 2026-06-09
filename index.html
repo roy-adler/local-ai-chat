@@ -277,8 +277,193 @@
   function renderAll() {
     els.messages.querySelectorAll(".msg").forEach((n) => n.remove());
     if (history.length) hideEmpty();
-    history.forEach((m) => addMessageNode(m.role, m.content));
+    history.forEach((m, i) => addMessageNode(m.role, m.content, i));
     scrollToBottom();
+  }
+
+  function historyIndexOf(msgEl) {
+    if (!msgEl || msgEl.dataset.historyIndex === undefined) return -1;
+    return Number(msgEl.dataset.historyIndex);
+  }
+
+  function syncUserHistory(idx, text) {
+    const entry = history[idx];
+    if (!entry || entry.role !== "user") return;
+    if (Array.isArray(entry.content)) {
+      const images = entry.content.filter((p) => p && p.type === "image_url");
+      const parts = text ? [{ type: "text", text }] : [];
+      entry.content = parts.length ? parts.concat(images) : (images.length ? images : "");
+    } else {
+      entry.content = text;
+    }
+  }
+
+  function syncAssistantAnswerHistory(idx, answer) {
+    const entry = history[idx];
+    if (!entry || entry.role !== "assistant") return;
+    const { reasoning } = extractThinkParts(entry.content, "");
+    entry.content = toStoredAssistantContent(answer, reasoning);
+  }
+
+  function syncAssistantReasoningHistory(idx, reasoning) {
+    const entry = history[idx];
+    if (!entry || entry.role !== "assistant") return;
+    const { answer } = extractThinkParts(entry.content, "");
+    entry.content = toStoredAssistantContent(answer, reasoning);
+  }
+
+  let activeEdit = null;
+
+  function finishActiveEdit(save = true) {
+    if (activeEdit) activeEdit.finish(save);
+  }
+
+  function attachClickAwaySave(container, onSave) {
+    const onOutside = (e) => {
+      if (container.contains(e.target)) return;
+      onSave();
+    };
+    setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
+    return () => document.removeEventListener("mousedown", onOutside, true);
+  }
+
+  function startBubbleEdit(bubbleWrap, bubble) {
+    if (bubble.classList.contains("cursor-blink")) return;
+    if (bubbleWrap.classList.contains("editing")) return;
+    finishActiveEdit(true);
+
+    const msgEl = bubbleWrap.closest(".msg");
+    const raw = bubbleWrap.dataset.raw || "";
+    bubbleWrap.classList.add("editing");
+
+    const ta = document.createElement("textarea");
+    ta.className = "bubble-edit";
+    ta.value = raw;
+    ta.spellcheck = false;
+
+    const actions = document.createElement("div");
+    actions.className = "bubble-edit-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "btn";
+    saveBtn.textContent = "Save";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn secondary";
+    cancelBtn.textContent = "Cancel";
+
+    let done = false;
+    let removeClickAway = () => {};
+
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      removeClickAway();
+      if (save) {
+        const text = ta.value;
+        setBubbleContent(bubbleWrap, bubble, text);
+        const idx = historyIndexOf(msgEl);
+        if (idx >= 0) {
+          const role = msgEl.classList.contains("assistant") ? "assistant" : "user";
+          if (role === "assistant") syncAssistantAnswerHistory(idx, text);
+          else syncUserHistory(idx, text);
+        }
+      }
+      ta.remove();
+      actions.remove();
+      bubbleWrap.classList.remove("editing");
+      if (activeEdit && activeEdit.wrap === bubbleWrap) activeEdit = null;
+    };
+
+    activeEdit = { wrap: bubbleWrap, finish };
+    removeClickAway = attachClickAwaySave(bubbleWrap, () => finish(true));
+
+    saveBtn.addEventListener("click", () => finish(true));
+    cancelBtn.addEventListener("click", () => finish(false));
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); finish(true); }
+    });
+    ta.addEventListener("blur", () => {
+      setTimeout(() => {
+        if (done || !bubbleWrap.classList.contains("editing")) return;
+        if (bubbleWrap.contains(document.activeElement)) return;
+        finish(true);
+      }, 0);
+    });
+
+    bubbleWrap.appendChild(ta);
+    bubbleWrap.appendChild(actions);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  function startThinkEdit(thinkEl) {
+    if (thinkEl.classList.contains("editing")) return;
+    finishActiveEdit(true);
+
+    const msgEl = thinkEl.closest(".msg");
+    const raw = thinkEl.dataset.raw || "";
+    thinkEl.classList.add("editing");
+
+    const ta = document.createElement("textarea");
+    ta.className = "think-edit-area";
+    ta.value = raw;
+    ta.spellcheck = false;
+
+    const actions = document.createElement("div");
+    actions.className = "think-edit-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "btn";
+    saveBtn.textContent = "Save";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn secondary";
+    cancelBtn.textContent = "Cancel";
+
+    let done = false;
+    let removeClickAway = () => {};
+
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      removeClickAway();
+      if (save) {
+        const text = ta.value;
+        thinkEl.dataset.raw = text;
+        const body = thinkEl.querySelector(".think-body");
+        if (body) body.innerHTML = renderMarkdown(text);
+        const idx = historyIndexOf(msgEl);
+        if (idx >= 0) syncAssistantReasoningHistory(idx, text);
+      }
+      ta.remove();
+      actions.remove();
+      thinkEl.classList.remove("editing");
+      if (activeEdit && activeEdit.wrap === thinkEl) activeEdit = null;
+    };
+
+    activeEdit = { wrap: thinkEl, finish };
+    removeClickAway = attachClickAwaySave(thinkEl, () => finish(true));
+
+    saveBtn.addEventListener("click", () => finish(true));
+    cancelBtn.addEventListener("click", () => finish(false));
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); finish(true); }
+    });
+    ta.addEventListener("blur", () => {
+      setTimeout(() => {
+        if (done || !thinkEl.classList.contains("editing")) return;
+        if (thinkEl.contains(document.activeElement)) return;
+        finish(true);
+      }, 0);
+    });
+
+    thinkEl.appendChild(ta);
+    thinkEl.appendChild(actions);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
   }
 
   // Splits assistant content into reasoning and answer.
@@ -369,20 +554,39 @@
   function createBubble(role, text) {
     const wrap = document.createElement("div");
     wrap.className = "bubble-wrap";
+    const toolbar = document.createElement("div");
+    toolbar.className = "bubble-toolbar";
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "bubble-tool";
+    editBtn.title = "Edit message";
+    editBtn.setAttribute("aria-label", "Edit message");
+    editBtn.textContent = "✎";
     const dl = document.createElement("button");
     dl.type = "button";
-    dl.className = "bubble-dl";
+    dl.className = "bubble-tool";
     dl.title = "Download";
     dl.setAttribute("aria-label", "Download message");
     dl.textContent = "↓";
+    toolbar.appendChild(editBtn);
+    toolbar.appendChild(dl);
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    wrap.appendChild(dl);
+    bubble.title = "Double-click to edit";
+    wrap.appendChild(toolbar);
     wrap.appendChild(bubble);
     setBubbleContent(wrap, bubble, text || "");
+    editBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startBubbleEdit(wrap, bubble);
+    });
     dl.addEventListener("click", (e) => {
       e.stopPropagation();
       downloadText(wrap.dataset.raw || "", role);
+    });
+    bubble.addEventListener("dblclick", (e) => {
+      if (e.target.closest("a, button")) return;
+      startBubbleEdit(wrap, bubble);
     });
     return { wrap, bubble };
   }
@@ -392,9 +596,10 @@
     bubble.innerHTML = renderMarkdown(text);
   }
 
-  function addMessageNode(role, content) {
+  function addMessageNode(role, content, historyIndex) {
     const wrap = document.createElement("div");
     wrap.className = "msg " + role;
+    if (historyIndex !== undefined) wrap.dataset.historyIndex = String(historyIndex);
     const roleEl = document.createElement("div");
     roleEl.className = "role";
     roleEl.textContent = role === "user" ? "You" : role;
@@ -429,11 +634,26 @@
     const d = document.createElement("details");
     d.className = "think";
     d.open = true;
+    d.dataset.raw = text || "";
     const s = document.createElement("summary");
-    s.textContent = "Reasoning";
+    s.appendChild(document.createTextNode("Reasoning"));
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "think-edit";
+    editBtn.title = "Edit reasoning";
+    editBtn.setAttribute("aria-label", "Edit reasoning");
+    editBtn.textContent = "✎";
+    editBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startThinkEdit(d);
+    });
+    s.appendChild(editBtn);
     const body = document.createElement("div");
     body.className = "think-body";
     body.innerHTML = renderMarkdown(text);
+    body.title = "Double-click to edit";
+    body.addEventListener("dblclick", () => startThinkEdit(d));
     d.appendChild(s); d.appendChild(body);
     return d;
   }
@@ -688,7 +908,7 @@
       if (!text && !attachedImages.length) return;
       const content = buildUserContent(text, attachedImages);
       history.push({ role: "user", content });
-      addMessageNode("user", content);
+      addMessageNode("user", content, history.length - 1);
       hideEmpty();
       els.input.value = "";
       attachedImages = [];
@@ -723,6 +943,7 @@
           asstWrap.insertBefore(thinkEl, bubbleWrap);
         }
         thinkBody.innerHTML = renderMarkdown(reasoning);
+        thinkEl.dataset.raw = reasoning;
       }
       setBubbleContent(bubbleWrap, bubble, answer);
       if (thinkEl && reasoning) thinkEl.open = true;
@@ -766,6 +987,7 @@
         role: "assistant",
         content: toStoredAssistantContent(full, reasoningFull),
       });
+      asstWrap.dataset.historyIndex = String(history.length - 1);
       setStatus("ready", "ok");
     } catch (err) {
       bubble.classList.remove("cursor-blink");
@@ -778,6 +1000,7 @@
             role: "assistant",
             content: toStoredAssistantContent(full, reasoningFull),
           });
+          asstWrap.dataset.historyIndex = String(history.length - 1);
         } else {
           asstWrap.remove();
         }
@@ -789,6 +1012,7 @@
             role: "assistant",
             content: toStoredAssistantContent(full, reasoningFull),
           });
+          asstWrap.dataset.historyIndex = String(history.length - 1);
         } else {
           asstWrap.remove();
         }

@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Five Server: index.html",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": [
+        "-e",
+        "console.log('Five Server is running. Press Shift+F5 to stop.'); process.stdin.resume()"
+      ],
+      "preLaunchTask": "Five Server: start",
+      "postDebugTask": "Five Server: stop",
+      "console": "integratedTerminal"
+    }
+  ]
+}
