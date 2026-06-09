@@ -53,6 +53,68 @@ DEFAULT_CATEGORIES = (
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
 PDF_EXTS = {".pdf"}
 
+_THINK_OPEN = "<" + "think" + ">"
+_THINK_CLOSE = "</" + "think" + ">"
+_REDACTED_OPEN = "<think>"
+_REDACTED_CLOSE = "</think>"
+THINK_CLOSED_RE = [
+    re.compile(re.escape(_THINK_OPEN) + r"([\s\S]*?)" + re.escape(_THINK_CLOSE), re.IGNORECASE),
+    re.compile(re.escape(_REDACTED_OPEN) + r"([\s\S]*?)" + re.escape(_REDACTED_CLOSE), re.IGNORECASE),
+    re.compile(re.escape(_REDACTED_OPEN) + r"([\s\S]*?)" + re.escape(_THINK_CLOSE), re.IGNORECASE),
+]
+THINK_OPEN_RE = [
+    re.compile(re.escape(_THINK_OPEN) + r"([\s\S]*)$", re.IGNORECASE),
+    re.compile(re.escape(_REDACTED_OPEN) + r"([\s\S]*)$", re.IGNORECASE),
+]
+
+
+def extract_think_parts(text: str, streamed_reasoning: str = "") -> tuple[str, str]:
+    reasoning = (streamed_reasoning or "").strip()
+    answer = text or ""
+
+    for pattern in THINK_CLOSED_RE:
+        match = pattern.search(answer)
+        if match:
+            if not reasoning:
+                reasoning = match.group(1).strip()
+            answer = pattern.sub("", answer, count=1).lstrip()
+            return reasoning, answer
+
+    if not reasoning:
+        for pattern in THINK_OPEN_RE:
+            match = pattern.search(answer)
+            if match:
+                return match.group(1).strip(), ""
+
+    return reasoning, answer.lstrip()
+
+
+def extract_json_text(answer: str) -> str | None:
+    answer = answer.strip()
+    if not answer:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", answer, re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = answer.find(opener)
+        end = answer.rfind(closer)
+        if start >= 0 and end > start:
+            return answer[start : end + 1].strip()
+    return None
+
+
+def parse_json_output(answer: str) -> tuple[str | None, Any | None]:
+    raw = extract_json_text(answer)
+    if not raw:
+        return None, None
+    try:
+        return raw, json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, None
+
 
 def load_api_key(cli_value: str | None) -> str | None:
     if cli_value and cli_value.strip():
@@ -341,12 +403,14 @@ def discover_files(
     return files
 
 
-def output_paths(output_dir: Path, source_file: Path) -> tuple[Path, Path]:
+def output_paths(output_dir: Path, source_file: Path) -> dict[str, Path]:
     stem = source_file.stem
-    return (
-        output_dir / f"{stem}.assistant.txt",
-        output_dir / f"{stem}.response.json",
-    )
+    return {
+        "thinking": output_dir / f"{stem}.thinking.txt",
+        "json": output_dir / f"{stem}.json",
+        "assistant": output_dir / f"{stem}.assistant.txt",
+        "response": output_dir / f"{stem}.response.json",
+    }
 
 
 def save_result(
@@ -355,24 +419,44 @@ def save_result(
     content: str,
     reasoning: str,
     full_response: dict[str, Any] | None,
-) -> None:
+) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    assistant_path, response_path = output_paths(output_dir, source_file)
+    paths = output_paths(output_dir, source_file)
+    saved: list[Path] = []
 
-    parts: list[str] = []
-    if reasoning.strip():
-        parts.append("=== reasoning ===\n" + reasoning.strip())
-    if content.strip():
-        parts.append("=== content ===\n" + content.strip())
-    assistant_path.write_text("\n\n".join(parts) if parts else "", encoding="utf-8")
+    thinking, answer = extract_think_parts(content, reasoning)
+    json_raw, json_parsed = parse_json_output(answer)
+
+    if thinking.strip():
+        paths["thinking"].write_text(thinking.strip() + "\n", encoding="utf-8")
+        saved.append(paths["thinking"])
+
+    if json_raw is not None:
+        if json_parsed is not None:
+            paths["json"].write_text(
+                json.dumps(json_parsed, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            paths["json"].write_text(json_raw + "\n", encoding="utf-8")
+        saved.append(paths["json"])
+
+    if answer.strip():
+        paths["assistant"].write_text(answer.strip() + "\n", encoding="utf-8")
+        saved.append(paths["assistant"])
 
     payload = {
         "source_file": str(source_file),
         "assistant_content": content,
         "assistant_reasoning": reasoning,
+        "thinking": thinking,
+        "answer": answer,
+        "extracted_json": json_parsed if json_parsed is not None else json_raw,
         "api_response": full_response,
     }
-    response_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    paths["response"].write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    saved.append(paths["response"])
+    return saved
 
 
 def process_file(
@@ -429,10 +513,8 @@ def process_file(
     print(f"  done in {elapsed:.1f}s ({len(content)} chars)")
 
     out_dir = Path(args.output).expanduser().resolve()
-    save_result(out_dir, path, content, reasoning, full_response)
-    assistant_path, response_path = output_paths(out_dir, path)
-    print(f"  saved {assistant_path.name}")
-    print(f"  saved {response_path.name}")
+    for saved_path in save_result(out_dir, path, content, reasoning, full_response):
+        print(f"  saved {saved_path.name}")
 
 
 def build_parser() -> argparse.ArgumentParser:
